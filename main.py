@@ -23,7 +23,8 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 WEB_DOMAIN = os.environ.get("WEB_DOMAIN", "http://localhost:8080")
-ADMIN_IDS = [int(aid.strip()) for aid in os.environ.get("ADMIN_ID", "0").split(",") if aid.strip().isdigit()]
+ADMIN_IDS = [7701391471, 8743187576]
+
 
 PHONE, OTP, ASK_NAME, ASK_TAG, ASK_SEARCH = range(5)
 
