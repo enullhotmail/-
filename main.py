@@ -42,23 +42,19 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 # ==========================================
-# سیستم امنیتی و سهمیه کاربران
+# سیستم امنیتی و سهمیه ثابت (مادام‌العمر) کاربران
 # ==========================================
 async def is_authorized(user_id):
     if is_admin(user_id): return True
     limit = await redis_client.get(f"quota_limit:{user_id}")
     return limit is not None
 
-async def get_today_date():
-    return datetime.now().strftime("%Y-%m-%d")
-
 async def check_user_quota(user_id):
     if is_admin(user_id): return True, "نامحدود", 0
     limit = await redis_client.get(f"quota_limit:{user_id}")
     if not limit: return False, 0, 0
     limit = int(limit)
-    today = await get_today_date()
-    used_key = f"quota_used:{user_id}:{today}"
+    used_key = f"quota_used:{user_id}"
     used = await redis_client.get(used_key)
     used = int(used) if used else 0
     if used >= limit: return False, limit, used
@@ -66,10 +62,8 @@ async def check_user_quota(user_id):
 
 async def increment_user_quota(user_id):
     if is_admin(user_id): return
-    today = await get_today_date()
-    used_key = f"quota_used:{user_id}:{today}"
+    used_key = f"quota_used:{user_id}"
     await redis_client.incr(used_key)
-    await redis_client.expire(used_key, 86400 * 2)
 
 # ==========================================
 # سیستم مدیریت پروکسی و API
@@ -302,8 +296,6 @@ async def handle_zip_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     action = context.user_data.get('admin_zip_action', 'zip_to_link')
     msg = await update.message.reply_text("⏳ در حال دریافت و استخراج فایل...")
-    expire_time = await redis_client.get("settings:expire_time")
-    expire_time = int(expire_time) if expire_time else 7200
     
     new_file = await update.message.document.get_file()
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -344,7 +336,8 @@ async def handle_zip_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if access_token and not await redis_client.exists(f"account:{phone}"):
                             await redis_client.hset(f"account:{phone}", mapping={"access_token": access_token, "refresh_token": refresh_token or ""})
                         link_id = str(uuid.uuid4())[:12]
-                        await redis_client.setex(f"acc_link:{link_id}", expire_time, file_content)
+                        # لینک‌ها برای همیشه و بدون انقضا ذخیره می‌شوند
+                        await redis_client.set(f"acc_link:{link_id}", file_content)
                         final_url = f"{WEB_DOMAIN}/acc/{link_id}"
                         links_text += f"📱 <b>شماره {phone}:</b>\n{final_url}\n\n"
                         count += 1
@@ -481,7 +474,7 @@ async def web_handler_get_account(request):
     link_id = request.match_info.get('link_id', '')
     data = await redis_client.get(f"acc_link:{link_id}")
     if data: return web.json_response(json.loads(data))
-    return web.json_response({"error": "لینک نامعتبر است یا منقضی شده."}, status=404)
+    return web.json_response({"error": "لینک نامعتبر است."}, status=404)
 
 async def start_web_server():
     app = web.Application()
@@ -498,8 +491,7 @@ async def start_web_server():
 def get_main_keyboard(is_admin_user):
     keyboard = [
         [InlineKeyboardButton("🔑 ورود به حساب (ساخت لینک)", callback_data="user_login")],
-        [InlineKeyboardButton("📂 دریافت تمام لینک‌های من", callback_data="get_my_links")],
-        [InlineKeyboardButton("⏳ تنظیم انقضای لینک‌های من", callback_data="set_my_expire")]
+        [InlineKeyboardButton("📂 دریافت تمام لینک‌های من", callback_data="get_my_links")]
     ]
     if is_admin_user:
         keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت (ادمین)", callback_data="admin_panel")])
@@ -507,7 +499,7 @@ def get_main_keyboard(is_admin_user):
 
 def get_admin_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📊 آمار دیتابیس", callback_data="admin_stats"), InlineKeyboardButton("⏳ انقضای پیش‌فرض", callback_data="admin_expire")],
+        [InlineKeyboardButton("📊 آمار دیتابیس", callback_data="admin_stats")],
         [InlineKeyboardButton("📋 گزارش لینک‌های کاربران", callback_data="admin_users_report")],
         [InlineKeyboardButton("🎁 بررسی تخفیف دیتابیس", callback_data="admin_check_discounts")],
         [InlineKeyboardButton("🔗 تبدیل زیپ به لینک", callback_data="admin_zip_to_link"), InlineKeyboardButton("🔍 بررسی تخفیف زیپ", callback_data="admin_zip_discount")],
@@ -536,7 +528,10 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = f"👋 <b>به سیستم لینک‌ساز خوش آمدید.</b>\n\n"
     if not admin_status:
-        text += f"📊 <b>وضعیت حساب شما:</b>\n▫️ محدودیت روزانه: <b>{limit}</b> لینک\n▫️ استفاده شده امروز: <b>{used}</b> لینک\n\n"
+        text += f"📊 <b>وضعیت حساب شما:</b>\n"
+        text += f"▫️ کل سهمیه اختصاص یافته: <b>{limit}</b> لینک\n"
+        text += f"▫️ لینک‌های ساخته شده: <b>{used}</b> لینک\n"
+        text += f"▫️ باقیمانده مجاز: <b>{limit - used}</b> لینک\n\n"
             
     text += "لطفاً یک گزینه را انتخاب کنید:"
     
@@ -555,7 +550,7 @@ async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_user = context.args[0]
         limit_count = int(context.args[1])
         await redis_client.set(f"quota_limit:{target_user}", limit_count)
-        await update.message.reply_text(f"✅ دسترسی کاربر <code>{target_user}</code> تنظیم شد.\nمحدودیت: <b>{limit_count}</b> لینک در روز.", parse_mode="HTML")
+        await update.message.reply_text(f"✅ دسترسی کاربر <code>{target_user}</code> تنظیم شد.\nکل سهمیه مجاز: <b>{limit_count}</b> لینک.", parse_mode="HTML")
     except Exception as e: await update.message.reply_text(f"❌ خطا: {str(e)}")
 
 async def del_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -592,7 +587,6 @@ async def core_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update, context)
         return
         
-    # --- توابع مربوط به کاربر (دریافت لینک، انقضا و اتمام ساخت) ---
     if data == "get_my_links":
         await query.answer("در حال دریافت لینک‌ها... ⏳")
         user_links_raw = await redis_client.lrange(f"user_links_history:{user_id}", 0, -1)
@@ -614,25 +608,6 @@ async def core_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(report_text, disable_web_page_preview=True, parse_mode='HTML', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]))
         return
 
-    if data == "set_my_expire":
-        kb = [
-            [InlineKeyboardButton("۱ ساعت ⏱", callback_data="myexp_3600"), InlineKeyboardButton("۱۲ ساعت 🕐", callback_data="myexp_43200")],
-            [InlineKeyboardButton("۲۴ ساعت 📅", callback_data="myexp_86400"), InlineKeyboardButton("۱ هفته 📆", callback_data="myexp_604800")],
-            [InlineKeyboardButton("۱ ماه 📦", callback_data="myexp_2592000")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
-        ]
-        current_exp = await redis_client.get(f"user_custom_expire:{user_id}")
-        current_str = f"{int(current_exp) // 86400} روز" if current_exp and int(current_exp) >= 86400 else f"{int(current_exp) // 3600} ساعت" if current_exp else "تعیین نشده (استفاده از پیش‌فرض)"
-        await query.edit_message_text(f"⏳ <b>تنظیم انقضای اختصاصی لینک‌های شما</b>\n\nتنظیم کنونی: <b>{current_str}</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        return
-
-    if data.startswith("myexp_"):
-        new_time = int(data.split("_")[1])
-        await redis_client.set(f"user_custom_expire:{user_id}", new_time)
-        await query.answer("✅ زمان انقضا با موفقیت تغییر یافت.", show_alert=True)
-        await show_main_menu(update, context)
-        return
-
     if data == "finish_link_creation":
         await query.answer("در حال آماده‌سازی لینک‌ها... ⏳")
         session_links = context.user_data.get('session_links', [])
@@ -650,7 +625,7 @@ async def core_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(report_text, disable_web_page_preview=True, parse_mode='HTML', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]))
         return
 
-    # --- توابع مدیریت ادمین (بازیابی شده کامل) ---
+    # --- توابع مدیریت ادمین ---
     if not is_admin(user_id): return
     await query.answer()
     
@@ -665,20 +640,9 @@ async def core_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         proxy_count = len(json.loads(proxies_json)) if proxies_json else 0
         maint = await redis_client.get("settings:maintenance")
         text = (f"📊 <b>وضعیت سیستم:</b>\n\n👤 <b>تعداد کل اکانت‌ها:</b> <code>{len(acc_keys)}</code>\n"
-                f"🔗 <b>لینک‌های فعال:</b> <code>{len(link_keys)}</code>\n🌐 <b>تعداد پروکسی‌ها:</b> <code>{proxy_count}</code>\n"
+                f"🔗 <b>لینک‌های فعال در دیتابیس:</b> <code>{len(link_keys)}</code>\n🌐 <b>تعداد پروکسی‌ها:</b> <code>{proxy_count}</code>\n"
                 f"🤖 <b>وضعیت ربات:</b> {'غیرفعال 🔴' if maint == '1' else 'فعال 🟢'}")
         await query.edit_message_text(text, reply_markup=get_admin_keyboard(), parse_mode='HTML')
-        
-    elif data == "admin_expire":
-        kb = [[InlineKeyboardButton("۱ ساعت ⏱", callback_data="set_exp_3600"), InlineKeyboardButton("۲۴ ساعت 🕐", callback_data="set_exp_86400")],
-              [InlineKeyboardButton("۱ هفته 📅", callback_data="set_exp_604800"), InlineKeyboardButton("۱ ماه 📆", callback_data="set_exp_2592000")],
-              [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]]
-        await query.edit_message_text("⏳ <b>انقضای پیش‌فرض سیستم را تعیین کنید:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-        
-    elif data.startswith("set_exp_"):
-        new_time = int(data.split("_")[2])
-        await redis_client.set("settings:expire_time", new_time)
-        await query.edit_message_text("✅ انقضای پیش‌فرض با موفقیت تغییر یافت.", reply_markup=get_admin_keyboard(), parse_mode='HTML')
 
     elif data == "admin_users_report":
         raw_logs = await redis_client.lrange("global_link_logs", 0, -1)
@@ -728,7 +692,7 @@ async def core_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not link_keys:
             await context.bot.send_message(chat_id=user_id, text="⚠️ هیچ لینکی موجود نیست.")
             return
-        export_text = "لیست لینک‌های فعال:\n\n"
+        export_text = "لیست لینک‌های موجود در دیتابیس:\n\n"
         for l_key in link_keys:
             link_id = l_key.replace("acc_link:", "")
             final_url = f"{WEB_DOMAIN}/acc/{link_id}"
@@ -771,16 +735,15 @@ async def core_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if "cookies" not in data_json: data_json["cookies"] = []
                         data_json["cookies"] = [c for c in data_json["cookies"] if c.get("name") not in ["tokenMS", "token", "refresh_token"]]
                         data_json["cookies"].extend([{"name": n, "value": v, "domain": ".okala.com", "path": "/", "secure": True, "sameSite": "None"} for n, v in [("tokenMS", t_ms), ("token", t_ms), ("refresh_token", r_tok)]])
-                        ttl = await redis_client.ttl(l_key)
-                        if ttl > 0:
-                            await redis_client.setex(l_key, ttl, json.dumps(data_json, ensure_ascii=False))
-                            repaired_count += 1
+                        # لینک‌ها را بدون انقضا ذخیره می‌کنیم
+                        await redis_client.set(l_key, json.dumps(data_json, ensure_ascii=False))
+                        repaired_count += 1
             except: pass
         await msg.edit_text(f"✅ عملیات پایان یافت.\n<b>{repaired_count}</b> لینک ترمیم شد.", parse_mode='HTML')
 
     elif data == "admin_clear":
         kb = [[InlineKeyboardButton("✅ تایید عملیات حذف", callback_data="admin_clear_confirm"), InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]]
-        await query.edit_message_text("⚠️ <b>اخطار:</b> این عملیات کل دیتابیس را حذف میکند. مطمئنید؟", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await query.edit_message_text("⚠️ <b>اخطار:</b> این عملیات کل دیتابیس (شماره‌ها) را حذف میکند. مطمئنید؟", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         
     elif data == "admin_clear_confirm":
         acc_keys = await redis_client.keys("account:*")
@@ -825,13 +788,17 @@ async def check_maintenance(update: Update) -> bool:
 async def start_login_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if await check_maintenance(update): return ConversationHandler.END
     user_id = update.effective_user.id
+    
     if not await is_authorized(user_id):
         await update.callback_query.answer("⛔️ شما مجاز نیستید.", show_alert=True)
         return ConversationHandler.END
+
     has_quota, limit, used = await check_user_quota(user_id)
     if not has_quota:
-        await update.callback_query.answer(f"سقف مجاز ({limit}) تمام شده است.", show_alert=True)
+        msg = f"سقف مجاز کل شما ({limit} لینک) به اتمام رسیده است." if limit > 0 else "شما دسترسی برای ساخت لینک ندارید."
+        await update.callback_query.answer(msg, show_alert=True)
         return ConversationHandler.END
+
     await update.callback_query.answer()
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ کنسل عملیات", callback_data="cancel_action")]])
     await update.callback_query.edit_message_text("📱 <b>لطفاً شماره موبایل خود را وارد کنید:</b>", reply_markup=kb, parse_mode='HTML')
@@ -854,7 +821,7 @@ async def request_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("✉️ <b>کد تایید ارسال شد.</b>\nلطفاً آن را وارد کنید:", reply_markup=kb, parse_mode='HTML')
         return OTP
     else:
-        await update.message.reply_text(f"❌ خطا در سیستم: <code>{response.status_code}</code>", parse_mode='HTML')
+        await update.message.reply_text(f"❌ خطا در ارتباط با سیستم: <code>{response.status_code}</code>", parse_mode='HTML')
         return ConversationHandler.END
 
 async def resend_otp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -910,7 +877,7 @@ async def generate_and_send_link(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     has_quota, limit, used = await check_user_quota(user_id)
     if not has_quota:
-        await status_msg.edit_text("❌ سقف مجاز ساخت لینک شما به پایان رسید.")
+        await status_msg.edit_text("❌ کل سقف مجاز ساخت لینک شما به پایان رسید.")
         return ConversationHandler.END
 
     auth_data = context.user_data.get('auth_data')
@@ -918,11 +885,8 @@ async def generate_and_send_link(update: Update, context: ContextTypes.DEFAULT_T
     injection_json = format_for_injector(auth_data)
     link_id = str(uuid.uuid4())[:12]
     
-    expire_time = await redis_client.get(f"user_custom_expire:{user_id}")
-    if not expire_time: expire_time = await redis_client.get("settings:expire_time")
-    expire_time = int(expire_time) if expire_time else 7200
-    
-    await redis_client.setex(f"acc_link:{link_id}", expire_time, json.dumps(injection_json, ensure_ascii=False))
+    # لینک‌ها برای همیشه و بدون انقضا ذخیره می‌شوند
+    await redis_client.set(f"acc_link:{link_id}", json.dumps(injection_json, ensure_ascii=False))
     final_url = f"{WEB_DOMAIN}/acc/{link_id}"
     
     if 'session_links' not in context.user_data: context.user_data['session_links'] = []
@@ -983,7 +947,7 @@ async def main():
     )
     application.add_handler(conv_handler)
     
-    application.add_handler(CallbackQueryHandler(core_callback, pattern="^admin_|^set_exp_|^main_menu$|^admin_panel$|^finish_link_creation$|^get_my_links$|^set_my_expire$|^myexp_"))
+    application.add_handler(CallbackQueryHandler(core_callback, pattern="^admin_|^main_menu$|^admin_panel$|^finish_link_creation$|^get_my_links$"))
     application.add_handler(MessageHandler(filters.TEXT | filters.Document.FileExtension("txt"), handle_admin_text_document))
 
     await application.initialize()
